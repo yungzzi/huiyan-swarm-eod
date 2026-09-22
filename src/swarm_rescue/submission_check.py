@@ -19,6 +19,15 @@ REQUIRED_ZIP_ENTRIES = (
     "req.txt",
 )
 
+# Optional image pointer. Lives in solutions/ (so it ends up at the zip root).
+# Empty or comment-only content means "evaluate the code shipped in this zip".
+# A non-empty value means "evaluate the solutions directory inside this image".
+IMAGE_REF_FILE = "image_ref.txt"
+IMAGE_REF_MAX_BYTES = 512
+IMAGE_REF_DIGEST_RE = re.compile(r"^sha256:[a-f0-9]{64}$")
+IMAGE_REF_CHARS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@-]*$")
+IMAGE_REF_TAG_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$")
+
 FORBIDDEN_ZIP_MARKERS = (
     ".venv/",
     "swarm_rescue/",
@@ -161,6 +170,110 @@ def validate_zip_contents(zip_path: Path) -> Tuple[bool, Optional[str]]:
     if missing:
         return False, f"Missing required files in {zip_path.name}: {', '.join(missing)}"
     return True, None
+
+
+def validate_image_ref(ref: str) -> Optional[str]:
+    """Return an error message when *ref* is not a usable image reference."""
+    if not ref:
+        return f"{IMAGE_REF_FILE}: image reference must not be empty"
+    if len(ref.encode("utf-8")) > IMAGE_REF_MAX_BYTES:
+        return (
+            f"{IMAGE_REF_FILE}: image reference is too long "
+            f"(max {IMAGE_REF_MAX_BYTES} bytes)"
+        )
+    if any(ch.isspace() for ch in ref):
+        return f"{IMAGE_REF_FILE}: image reference must not contain whitespace ({ref!r})"
+    if "//" in ref:
+        return f"{IMAGE_REF_FILE}: image reference must not contain '//' ({ref!r})"
+    if not IMAGE_REF_CHARS_RE.match(ref):
+        return (
+            f"{IMAGE_REF_FILE}: invalid image reference {ref!r}; expected "
+            "[registry/]repository[:tag][@sha256:<64 hex>]"
+        )
+
+    name_and_tag = ref
+    if "@" in ref:
+        name_and_tag, digest = ref.rsplit("@", 1)
+        if not name_and_tag:
+            return f"{IMAGE_REF_FILE}: missing repository before '@' ({ref!r})"
+        if not IMAGE_REF_DIGEST_RE.match(digest):
+            return (
+                f"{IMAGE_REF_FILE}: only '@sha256:<64 hex>' digests are supported "
+                f"({ref!r})"
+            )
+
+    last_segment = name_and_tag.rsplit("/", 1)[-1]
+    if ":" in last_segment:
+        repo_name, tag = last_segment.rsplit(":", 1)
+        if not repo_name:
+            return f"{IMAGE_REF_FILE}: missing repository name before tag ({ref!r})"
+        if not IMAGE_REF_TAG_RE.match(tag):
+            return f"{IMAGE_REF_FILE}: invalid tag {tag!r} ({ref!r})"
+    return None
+
+
+def parse_image_ref_text(text: str) -> Tuple[Optional[str], Optional[str]]:
+    """Parse ``image_ref.txt`` content.
+
+    Returns ``(image_ref, error)``. Blank or comment-only content yields
+    ``(None, None)``, which means "use the code shipped in the zip".
+    """
+    lines: List[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        lines.append(line)
+
+    if not lines:
+        return None, None
+    if len(lines) > 1:
+        return None, (
+            f"{IMAGE_REF_FILE} must contain a single image reference "
+            f"(found {len(lines)} non-comment lines)"
+        )
+
+    ref = lines[0]
+    err = validate_image_ref(ref)
+    if err:
+        return None, err
+    return ref, None
+
+
+def read_submission_image_zip(zip_path: Path) -> Tuple[Optional[str], Optional[str]]:
+    """Read the optional image pointer from a submission zip."""
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            members = [
+                name for name in zf.namelist()
+                if not name.endswith("/")
+                and name.replace("\\", "/").rsplit("/", 1)[-1] == IMAGE_REF_FILE
+            ]
+            if not members:
+                return None, None
+            members.sort(key=lambda name: name.replace("\\", "/").count("/"))
+            raw = zf.read(members[0])
+    except zipfile.BadZipFile:
+        return None, f"Invalid zip file: {zip_path}"
+    except (KeyError, OSError):
+        return None, None
+    return parse_image_ref_text(raw.decode("utf-8", errors="replace"))
+
+
+def read_submission_image_workspace(root: Path) -> Tuple[Optional[str], Optional[str]]:
+    """Read the optional image pointer from a project workspace tree."""
+    path = root / WORKSPACE_SOLUTIONS / IMAGE_REF_FILE
+    if not path.is_file():
+        return None, None
+    return parse_image_ref_text(path.read_text(encoding="utf-8", errors="replace"))
+
+
+def read_submission_image(target: Path) -> Tuple[Optional[str], Optional[str]]:
+    """Read the image pointer from a submission zip or a workspace tree."""
+    target = target.resolve()
+    if target.is_file() and target.suffix.lower() == ".zip":
+        return read_submission_image_zip(target)
+    return read_submission_image_workspace(target)
 
 
 def _collect_zip_names(zip_path: Path) -> Tuple[Optional[set], Optional[str]]:
@@ -555,6 +668,28 @@ def validate_zip_archive(zip_path: Path) -> SubmissionCheckResult:
                     "folder, not the folder itself."
                 )
 
+    image_ref, image_err = read_submission_image_zip(path)
+    if image_err:
+        result.add_error(image_err)
+    elif image_ref:
+        nested_image = [
+            n for n in names
+            if n.replace("\\", "/").endswith(f"/{IMAGE_REF_FILE}")
+            and "/" in n.replace("\\", "/").rstrip("/")
+        ]
+        has_root_image = any(
+            n.replace("\\", "/") == IMAGE_REF_FILE for n in names
+        )
+        if nested_image and not has_root_image:
+            result.add_error(
+                f"{IMAGE_REF_FILE} must be at the zip root, not inside a folder "
+                f"(found: {nested_image[0]})."
+            )
+        result.add_warning(
+            f"{IMAGE_REF_FILE} points at {image_ref}: the evaluator will run the "
+            "solutions shipped in that image and ignore the code in this zip"
+        )
+
     size = path.stat().st_size
     has_models = _zip_has_model_weights(names)
     soft_limit = (
@@ -670,6 +805,15 @@ def validate_workspace(root: Path) -> SubmissionCheckResult:
     drone_err = validate_my_drone_eval_source(drone_path)
     if drone_err:
         result.add_error(drone_err)
+
+    image_ref, image_err = read_submission_image_workspace(root)
+    if image_err:
+        result.add_error(image_err)
+    elif image_ref:
+        result.add_warning(
+            f"{IMAGE_REF_FILE} points at {image_ref}: the evaluator will run the "
+            "solutions shipped in that image and ignore the code in this submission"
+        )
 
     scan_submission_python_sources(_python_sources_from_directory(solutions), result)
 
