@@ -51,6 +51,8 @@ class MyMapLidar(MapAbstract):
 
         # PARAMETERS MAP
         self._size_area = (1113, 750)
+        # This sensor-only demo does not spawn any bombs.
+        self._number_bombs = 0
 
         self._disposal_center = DisposalCenter(size=(210, 90))
         self._disposal_center_pos = ((440, 315), 0)
