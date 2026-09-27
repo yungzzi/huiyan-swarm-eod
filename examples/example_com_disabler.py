@@ -54,6 +54,8 @@ class MyMapComDisabler(MapAbstract):
 
         # PARAMETERS MAP
         self._size_area = (1000, 600)
+        # This communication-only demo does not spawn any bombs.
+        self._number_bombs = 0
 
         self._no_com_zone = NoComZone(size=(150, 150))
         self._no_com_zone_pos = ((-350, 0), 0)
