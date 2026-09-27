@@ -55,6 +55,8 @@ class MyMapGpsDisabler(MapAbstract):
 
         # PARAMETERS MAP
         self._size_area = (800, 600)
+        # This GPS-only demo does not spawn any bombs.
+        self._number_bombs = 0
 
         self._no_gps_zone = NoGpsZone(size=(300, 400))
         self._no_gps_zone_pos = ((200, 0), 0)
