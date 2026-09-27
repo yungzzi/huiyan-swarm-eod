@@ -159,6 +159,8 @@ class MyMap(MapAbstract):
 
         # PARAMETERS MAP
         self._size_area = (600, 400)
+        # This translation-control demo does not spawn any bombs.
+        self._number_bombs = 0
 
         # POSITIONS OF THE DRONES
         self._number_drones = 3
